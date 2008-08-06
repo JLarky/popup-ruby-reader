@@ -1,0 +1,161 @@
+#!/usr/bin/ruby
+=)
+
+require 'pcaplet'	# отлов попапов
+require 'iconv'		# перекодирование
+require 'mysql'		# для работы с базой
+require 'daemonize'	# для возможности запуска
+require 'getoptlong'	# запуск с различными параметрами
+
+# config
+@iface="eth1"
+@dbhost="localhost";
+@dbuser="popsnifer";
+@dbpass="";
+@dbbase="popup";
+@dbtable="popups";
+
+@demonize=false
+@p2base=false
+@sound=false
+@flood=false
+@p2file=false
+
+
+include Daemonize
+
+def Initialize
+if @demonize then daemonize() end
+	loop do
+		p = Pcaplet.new('-i '+@iface+' -s 65536')
+		p.add_filter(Pcap::Filter.new('ip and udp and dst port 138', p.capture))
+		p.each_packet { |pkt|
+			if pkt.raw_data[203,1].to_s.downcase == 'm'
+				@src_mac = sprintf('%.2x:%.2x:%.2x:%.2x:%.2x:%.2x', pkt.raw_data[6], pkt.raw_data[7], pkt.raw_data[8], pkt.raw_data[9], pkt.raw_data[10], pkt.raw_data[11])
+				@dst_mac = sprintf('%.2x:%.2x:%.2x:%.2x:%.2x:%.2x', pkt.raw_data[0], pkt.raw_data[1], pkt.raw_data[2], pkt.raw_data[3], pkt.raw_data[4], pkt.raw_data[5])
+				@src_ip = sprintf('%d.%d.%d.%d', pkt.raw_data[26], pkt.raw_data[27], pkt.raw_data[28], pkt.raw_data[29])
+				@dst_ip = sprintf('%d.%d.%d.%d', pkt.raw_data[30], pkt.raw_data[31], pkt.raw_data[32], pkt.raw_data[33])
+				shift = 124 + pkt.raw_data[181]
+				dump = Iconv.conv('utf8', 'cp866', pkt.raw_data[shift..pkt.length].to_s).split(/\000/)
+				if dump[0] != nil and dump[1] != nil and dump[2] != nil then GluePopup(dump[0], dump[1], dump[2]) end
+			end
+		}
+		p.close
+	end
+end
+
+@last = Array.new(50)
+
+def GluePopup(from, to, what)
+	if what[-5..-1] == '~-->~' and what[0..4] == '~<--~' and @tmpfrom == from and @tmpto == to
+		@tmpwhat += what[5..-6]
+	else if what[-5..-1] == '~-->~'
+		@tmpwhat = what[0..-6]
+		@tmpfrom = from
+		@tmpto = to
+	else if what[0..4] == '~<--~' and @tmpfrom == from and @tmpto == to
+		what = @tmpwhat + what[5..-1]
+	end end end
+	if what[-5..-1] != '~-->~' and what[0..4] != '~<--~'
+		PrintPopup(from, to, what)
+	end
+rescue
+# а вот и баги попёрли...
+#system("echo \"a vot i upalo `date -R`\" | mail jlarky")
+puts "a ty govoril ne padaet"
+ensure
+
+end
+
+def PrintPopup(from, to, what)
+	if not @last.include?(Array[@src_mac, what,from,@dst_mac])
+		puts '[' + Time.now.strftime('%d.%m.%Y %H:%M:%S') + '] ' + from + ' -> ' + to, what, "-----\r\n"
+	if @p2file	
+		pHst = File.open("/home/mntek/popups.txt", "a+")
+		pHst.puts '[' + Time.now.strftime('%d.%m.%Y %H:%M:%S') + '] ' + from + ' (' + @src_ip + ', ' + @src_mac + ') -> ' + to, what, "-----\r\n"
+		pHst.close
+	end
+
+        if @sound
+		if to.upcase=="JLARKY" or to.upcase=="PROXY" or to.upcase=="JL"
+		system("play /tmp/private.mp3 >/dev/null 2>&1 &"); else
+		system("play /tmp/group.mp3 >/dev/null 2>&1 &"); end
+        end
+
+	if @flood and from.downcase!="time"
+tmp_str=""
+msg=""
+what.each_line {|str| if str[0]!=62 then tmp_str=tmp_str+">"+str end;}
+#p tmp_str; 
+		if ( (tmp_str.include?('температура') or tmp_str.downcase.include?('сколько') or tmp_str.downcase.include?('скока')) and (tmp_str.downcase.include?('градусов') or tmp_str.downcase.include?('за бортом')) or to.upcase=="TIME") then p "temp";
+	msg="`/var/www/time/time.sh`";
+		end;
+
+		if ( (tmp_str.downcase.include?("кто") and tmp_str.downcase.include?("печатает")) or (tmp_str.downcase.include?("может") and tmp_str.downcase.include?("распечатать")) ) then p "print";
+	msg=tmp_str+"\n\nсписок печатающих на http://wiki/bbs:print";
+		end;
+
+		if ((tmp_str.downcase.include?("test") or tmp_str.downcase.include?("тест")) and ()) then p "test";
+	msg=tmp_str+"\n\ntest ok";
+		end;
+
+		if (msg!="")
+#system("sudo /usr/local/bin/botsend TIME \""+Mysql.escape_string(from)+"\" \""+msg+"\" ");
+system("echo \""+msg+"\" | /usr/local/bin/tvsender TIME \""+Mysql.escape_string(from)+"\"");
+
+		end;
+
+	end
+
+	if @p2base
+		dbh = Mysql.real_connect(@dbhost, @dbuser, @dbpass, @dbbase)
+		dbh.query("SET NAMES 'utf8'")
+
+		dbh.query("insert into `"+@dbtable+"` (`src_mac`, `src_ip`, `src_ntb`, `src_mls`, `dst_mac`, `dst_ntb`, `dst_mls`, `msg`) values('"+@src_mac+"','"+@src_ip+"','"+dbh.escape_string(from)+"','"+dbh.escape_string(from)+"','"+dbh.escape_string(@dst_mac)+"','"+dbh.escape_string(to)+"','"+dbh.escape_string(to)+"','"+dbh.escape_string(what)+"')")
+		dbh.close if dbh
+	end
+		if @last.nitems == 50 then @last.delete_at(0) end
+		@last[@last.nitems] = Array[@src_mac, what,from,@dst_mac]
+	end
+end
+
+
+
+ begin
+# опции запуска ридера
+opts = GetoptLong.new(
+  [ "-d", "--daemon",             GetoptLong::NO_ARGUMENT ],
+  [ "-b",   "--base",             GetoptLong::NO_ARGUMENT ],
+  [ "-a",   "--bot",              GetoptLong::NO_ARGUMENT ],
+  [ "-s",   "--sound",            GetoptLong::NO_ARGUMENT ],
+  [ "-f",   "--file",             GetoptLong::REQUIRED_ARGUMENT ],
+  [ "-i",   "--iface",            GetoptLong::REQUIRED_ARGUMENT ]
+)
+
+   opts.each do |opt, arg|
+case opt
+   when "-d"
+    puts "programm was demonized"
+@demonize=true
+   when "-b"
+    puts "starting logging into MySQL"
+@p2base=true
+   when "-s"
+    puts "starting sound notifications"
+@sound=true
+   when "-a"
+    puts "starting bot functionality"
+@flood=true
+   when "-f"
+    puts "staring logging into file "+arg+""
+@p2file=true
+   when "-i"
+    puts "forking with "+arg+" interface"
+@iface=arg
+   end
+end
+      rescue GetoptLong::InvalidOption,GetoptLong::InvalidOption,GetoptLong::MissingArgument
+   exit 1
+ end
+
+Initialize()
